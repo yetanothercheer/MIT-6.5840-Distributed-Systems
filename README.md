@@ -23,5 +23,26 @@ Main loop reads channel: if vote > n/2 { state = Leader; go send heartbeat loop 
 General Requirements:
 If an RPC req/res contains a term > currentTerm, set currentTerm = term and state = Follower.
 
-TODO: Part 3B, Part 3C, Part 3D
+Part 3B: log
+more states:
+log = []
+commitIndex = 0
+lastApplied = 0
+
+leader only states (initialize at Candicate -> Leader):
+nextIndex = [len(log) +1] * len(peers)
+matchIndex = [0] * len(peers)
+
+Step1. leader receives Start(command)
+append command to log
+set matchIndex[me] = len(log)
+set nextIndex[me] = len(log) + 1
+
+Step2. extended sendHeartbeats()
+send entries from nextIndex[peer] to len(log) - 1
+
+Step3. follower and leader apply logs in a loop
+
+
+TODO: Part 3C, Part 3D
 ```
