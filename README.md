@@ -1,6 +1,8 @@
 6.5840
 
 ```
+Notes: 
+
 Lab3 Raft
 https://pdos.csail.mit.edu/6.824/labs/lab-raft1.html
 https://raft.github.io/raft.pdf
@@ -43,6 +45,5 @@ send entries from nextIndex[peer] to len(log) - 1
 
 Step3. follower and leader apply logs in a loop
 
-
-TODO: Part 3C, Part 3D
+Part 3C, 3D: Vibe Coding
 ```
