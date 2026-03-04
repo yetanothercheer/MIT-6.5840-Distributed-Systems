@@ -8,13 +8,13 @@ package raft
 // raft interface.
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sort"
 	"sync"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -93,6 +93,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -113,6 +120,20 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		return
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -167,6 +188,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.state = Follower
 		rf.votedFor = -1
+
+		rf.persist()
 	}
 
 	// RequestVote RPC Rule 2
@@ -174,6 +197,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		rf.lastHeartbeat = time.Now()
 		reply.VoteGranted = true
+
+		rf.persist()
 	} else {
 		reply.VoteGranted = false
 	}
@@ -239,6 +264,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:    term,
 		Command: command,
 	})
+	rf.persist()
 
 	rf.matchIndex[rf.me] = index
 	rf.nextIndex[rf.me] = index + 1
@@ -271,6 +297,8 @@ func (rf *Raft) ticker() {
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.currentTerm++
+	rf.persist()
+
 	rf.votedFor = rf.me
 	rf.state = Candidate
 	term := rf.currentTerm
@@ -311,6 +339,7 @@ func (rf *Raft) startElection() {
 					rf.currentTerm = reply.Term
 					rf.state = Follower
 					rf.votedFor = -1
+					rf.persist()
 					return
 				}
 
@@ -415,6 +444,7 @@ func (rf *Raft) sendHeartbeats() {
 						rf.currentTerm = reply.Term
 						rf.state = Follower
 						rf.votedFor = -1
+						rf.persist()
 						return
 					}
 
@@ -429,9 +459,45 @@ func (rf *Raft) sendHeartbeats() {
 
 					// If AppendEntries RPC fails
 					if !reply.Success {
-						rf.nextIndex[peer]--
-						if rf.nextIndex[peer] < 1 {
-							rf.nextIndex[peer] = 1
+						// Before 3C:
+						// rf.nextIndex[peer]--
+						// if rf.nextIndex[peer] < 1 {
+						// rf.nextIndex[peer] = 1
+						// }
+
+						// After 3C:
+						//   Case 1: leader doesn't have XTerm:
+						//     nextIndex = XIndex
+						//   Case 2: leader has XTerm:
+						//     nextIndex = (index of leader's last entry for XTerm) + 1
+						//   Case 3: follower's log is too short:
+						//     nextIndex = XLen
+
+						hasXTerm := false
+						for j := len(rf.log) - 1; j >= 0; j-- {
+							if rf.log[j].Term == reply.XTerm {
+								hasXTerm = true
+								break
+							}
+						}
+
+						if reply.XTerm == -1 {
+							// Case 3: follower's log is too short
+							rf.nextIndex[peer] = reply.XLen
+						} else if !hasXTerm {
+							// Case 1: leader doesn't have XTerm
+							rf.nextIndex[peer] = reply.XIndex
+						} else {
+							// Case 2: leader has XTerm
+							// find the last index in leader's log with XTerm
+							lastXTermIndex := 0
+							for j := len(rf.log) - 1; j >= 0; j-- {
+								if rf.log[j].Term == reply.XTerm {
+									lastXTermIndex = j
+									break
+								}
+							}
+							rf.nextIndex[peer] = lastXTermIndex + 1
 						}
 					}
 				}
@@ -472,6 +538,11 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	// You will probably need the optimization that backs up nextIndex by more than one entry at a time.
+	XTerm  int
+	XIndex int
+	XLen   int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -483,6 +554,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.state = Follower
 		rf.votedFor = -1
+
+		rf.persist()
 	}
 
 	reply.Term = rf.currentTerm
@@ -499,6 +572,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// AppendEntries RPC, Rule 2
 	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		if args.PrevLogIndex >= len(rf.log) {
+			reply.XLen = len(rf.log)
+			reply.XTerm = -1
+			reply.XIndex = len(rf.log)
+		} else {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			// find first index of XTerm
+			xIndex := args.PrevLogIndex
+			for xIndex > 0 && rf.log[xIndex-1].Term == reply.XTerm {
+				xIndex--
+			}
+			reply.XIndex = xIndex
+			reply.XLen = len(rf.log)
+		}
 		return
 	}
 
@@ -510,6 +597,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for insertIndex < len(rf.log) && argsIndex < len(args.Entries) {
 		if rf.log[insertIndex].Term != args.Entries[argsIndex].Term {
 			rf.log = rf.log[:insertIndex]
+			rf.persist()
 			break
 		}
 		insertIndex++
@@ -519,6 +607,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// append entries after the first differing index
 	if argsIndex < len(args.Entries) {
 		rf.log = append(rf.log, args.Entries[argsIndex:]...)
+		rf.persist()
 	}
 
 	// AppendEntries RPC, Rule 5
